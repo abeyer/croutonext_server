@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+
+import asyncio
+
+import websockets
+
+
+VERSION = 2
+COMMANDS = (
+    'W', # write to chromeos clipboard
+    'U', # request chromeos open URL
+    'N'  # post chromeos notification
+)
+
+_q = asyncio.Queue()
+
+def make_msg(cmd, arg):
+    return str(cmd) + str(arg)
+
+def read_msg(msg):
+    return (msg[0], msg[1:])
+
+@asyncio.coroutine
+def handle_crouton(websocket, path):
+    """Handle crouton extension websocket"""
+    global _q
+
+    # version handshake
+    yield from websocket.send(make_msg('V', VERSION))
+    m = yield from websocket.recv()
+    (v, status) = read_msg(m)
+
+    if status != 'OK':
+        print('Version handshake failed: {}'.format(status))
+    else:
+        while True:
+            socket_task = asyncio.async(websocket.recv())
+            queue_task = asyncio.async(_q.get())
+
+            done, pending = yield from asyncio.wait([socket_task, queue_task], return_when=asyncio.FIRST_COMPLETED)
+
+            if socket_task in done:
+                m = socket_task.result()
+                (cmd, arg) = read_msg(m)
+            else:
+                socket_task.cancel()
+
+            if queue_task in done:
+                m = queue_task.result()
+                (cmd, arg) = read_msg(m)
+                yield from websocket.send(m)
+                r = yield from websocket.recv()
+                (cmd, result) = read_msg(r)
+                #TODO: handle results
+            else:
+                queue_task.cancel()
+
+
+@asyncio.coroutine
+def handle_client(websocket, path):
+    """Handle clipboard client websocket"""
+    global _q
+
+    m = yield from websocket.recv()
+    (cmd, arg) = read_msg(m)
+
+    if cmd in COMMANDS:
+        _q.put_nowait(m)
+    else:
+        print('Unrecognized command: {}({})'.format(cmd, arg))
+        yield from websocket.send(make_msg('E', 'Unrecognized command'))
+
+
+def run_forever():
+    """Run websocket server for crouton extension support"""
+    crouton_server = websockets.serve(handle_crouton, 'localhost', 30001)
+    asyncio.get_event_loop().run_until_complete(crouton_server)
+
+    client_server = websockets.serve(handle_client, 'localhost', 30002)
+    asyncio.get_event_loop().run_until_complete(client_server)
+
+    asyncio.get_event_loop().run_forever()
+
+if __name__ == "__main__":
+    run_forever()

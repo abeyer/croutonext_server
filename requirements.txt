@@ -1,0 +1,2 @@
+click~=6.6
+websockets~=3.1
